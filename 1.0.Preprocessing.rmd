@@ -1,0 +1,268 @@
+---
+title: Text Mining I
+author: Aleksei Gorgadze
+output: html_document
+editor_options: 
+  chunk_output_type: console
+  code_folding: show
+---
+
+## Text into data
+
+Install necessary packages, if required. 
+
+```{r, eval=FALSE}
+install.packages("readxl")
+install.packages("plyr")
+install.packages("dplyr")
+install.packages("tidytext")
+install.packages("stopwords")
+install.packages("wordcloud")
+install.packages("ggplot2")
+```
+
+Text mining tasks usually deal with a large number of text fragments:
+e. g. tweets, news, reviews etc. Having obtained these kind of data,
+we commonly have them in a table format with one of the columns
+containing text data, one at a line. Other columns typically contain
+some *metadata* about the text: author, title, date etc.
+
+Our today's example is a collection of PostNauka video lectures.
+The source of data: https://postnauka.ru
+
+```{r}
+library(readxl)
+pn_df <- read_excel("PostNauka_data.xlsx")
+```
+
+One line in a table corresponds to a lecturer's speech. Texts are
+located in the column "Text".
+
+
+```{r}
+library(plyr)
+library(dplyr)
+library(tidytext)
+library(stringr)
+
+text_df <- data_frame(line = as.integer(pn_df$ID), text = pn_df$Text, prof = pn_df$Profession_Code)
+rm(pn_df)
+
+pn_df.long <- text_df %>%
+    unnest_tokens(words, text)
+
+?unnest_tokens
+```
+
+Tokens are units of text, words in our case. Characters, sentences,
+word sequences (n-grams) may also serve as tokens for some tasks.
+
+## Frequency
+
+Now we have a *words* column in our table. Technically, it is a
+categorical variable with as many values as there are distinct words
+in all the texts. 
+
+```{r}
+pn_df.long %>%
+    select(words) %>%
+    n_distinct() # quite a lot!
+```
+
+Too much words to inspect. Let's have a glance at the most frequent
+ones, they should be the most informative, shouldn't they?
+
+```{r}
+library(ggplot2)
+pn_df.long%>%
+    dplyr::count(words, sort = TRUE) %>%
+    filter(row_number() < 30) %>%
+    ggplot(aes(x = reorder(words, n), y = n)) +
+    geom_col() +
+    labs(x = "word") + 
+    coord_flip() +
+    theme(axis.text=element_text(size=18))
+```
+
+Not very informative. Well, how the distribution looks like?
+
+## Task
+1. Draw a graph of words with a rank from 30 to 50
+2. You have 3 min
+
+```{r}
+
+```
+
+## Lexical statistics. Zipf's law
+
+```{r}
+pn_df.long %>%
+    dplyr::count(words, sort = TRUE) %>%
+    filter(n>250) %>%
+    ggplot(aes(rev(reorder(words, n)), n)) +
+    geom_bar(stat="identity", show.legend=FALSE) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Long-tail distribution (power law). Few giants, many dwarfs.
+
+It was empirically observed that for any large enough collection of
+texts the distribution of word frequencies is almost log-linear.
+
+```{r}
+pn_df.long %>%
+    dplyr::count(words, sort = TRUE) %>%
+    dplyr::mutate(rank = row_number()) %>%
+    ggplot(aes(rank, n)) +
+    geom_line() +
+    scale_x_log10() +
+    scale_y_log10()
+```
+
+This observation is called *Zipf's law*.
+
+## More preprocessing. Stemming and lemmatization
+
+Before we move on to measuring the prevalence of content words, it is
+beneficial to make our text data less noisy. In natural language the
+same word may take various surface forms: plurals, past tense
+etc. This may be of less concern for English, but more so for more
+inflected languages. When we are interested in content, it is better
+to treat all these *wordforms* as the same word.
+
+There are two common approaches.
+
+1. **Stemming**. Simply remove word endings that contain inflection,
+   leaving a *stem*. The approach is simple and fast, and is
+   supported by numerous R packages.
+2. **Lemmatization**. Reduce a word to its dictionary form вЂ” a
+   *lemma*. This requires more linguistic data (dictionary etc.), but
+   gives more precise results. We will stick to this method.
+
+## Lemmatization 
+Open Mystem in cmd
+Cleanup after mystem (remove braces)
+
+```{r}
+library(readr)
+text_PN_lem <- read_delim("text_PN.lem.txt", "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE)
+
+## Cleanup after mystem (remove braces)
+## replaces: "{word}" -> "word" ; "{nrzb??}" -> "nrzb"
+text_PN_lem <- gsub("[{}]", "", text_PN_lem$X1)
+text_PN_lem <- gsub("(\\|[^ ]+)", "", text_PN_lem)
+text_PN_lem <- gsub("\\?", "", text_PN_lem)
+text_PN_lem <- gsub("\\s+", " ", text_PN_lem)
+text_PN_lem <- as.data.frame(text_PN_lem, stringsAsFactors = F)
+
+## Attach lemmatized text as a column to the data
+text_df <- cbind(text_df, text_PN_lem)
+rm(text_PN_lem)
+
+## Look at the differences of "text" and "text.lem"
+text_df[2,c(2,4)]
+```
+
+## Transform lemmatized text data into long format, removing stopwords and numbers on the way.
+
+```{r}
+text_lem.long <- text_df %>%
+    unnest_tokens(words, text_PN_lem)
+
+library(ggplot2)
+text_lem.long %>%
+    dplyr::count(words, sort = TRUE) %>%
+    filter(row_number() < 15) %>%
+    ggplot(aes(x = reorder(words, n), y = n)) +
+    geom_col() +
+    labs(x = "word") + 
+    coord_flip() +
+    theme(axis.text=element_text(size=18))
+```
+
+## Stopwords
+
+The most frequent words in any language prepositions, conjunctions,
+pronouns have the most abstract meaning. If we are interested in
+analysing content of the texts, they are not informative to us. 
+Let's try to get rid of them.
+
+The list of these grammatical words for English and other languages
+may be found in the stopwords package.
+
+```{r}
+library(stopwords)
+stopwords::stopwords("ru")
+```
+
+We have already seen a very similar list...
+
+```{r}
+top175words <- text_lem.long %>%
+    dplyr::count(words, sort=TRUE) %>%
+    filter(row_number() < 175) %>%
+    pull(words)
+head(top175words, 35)
+top175words[!top175words %in% stopwords::stopwords("ru")]
+```
+
+Let's eliminate stopwords from the text and look what is left. 
+
+```{r}
+my_stopwords <- data.frame(words=stopwords("ru"), stringsAsFactors=FALSE)
+text_lem.nonstop <- text_lem.long %>%
+    anti_join(my_stopwords)
+
+text_lem.nonstop %>%
+    dplyr::count(words, sort = TRUE) %>%
+    filter(row_number() < 15) %>%
+    ggplot(aes(x = reorder(words, n), y = n)) +
+    geom_col() +
+    labs(x = "word") + 
+    coord_flip() +
+    theme(axis.text=element_text(size=18))
+```
+
+### Task
+1. Remove extra stop words from the top 10 (such as "это", "который" etc.) using "c" function. Leave only informative words!
+2. Draw a chart of the top 25 words
+
+```{r}
+
+```
+
+What percentage of total text volume has been removed?
+
+## Wordcloud
+
+Now we are going to represent the list of teh most frequent words as a
+word cloud.
+
+```{r}
+library(wordcloud)
+text_lem.nonstop %>%
+    dplyr::count(words) %>%
+    with(wordcloud(words, n, max.words = 100))
+```
+
+It is natural to assume that different scientists differ in their word
+usage. Wordclouds may be used to demonstrate this.
+
+```{r}
+library(wordcloud)
+text_lem.nonstop %>%
+    dplyr::count(words) %>%
+    with(wordcloud(words, n, max.words = 100, random.order=FALSE, 
+                   rot.per=0.35, colors=brewer.pal(8, "Dark2")))
+
+# Save wordcloud in PNG
+png("Name_Cloud.png", width=12, height=8, units="in", res=300)
+text_lem.nonstop %>%
+    dplyr::count(words) %>%
+    with(wordcloud(words, n, max.words = 100, random.order=FALSE, 
+                   rot.per=0.35, colors=brewer.pal(8, "Dark2")))
+dev.off()
+```
+
