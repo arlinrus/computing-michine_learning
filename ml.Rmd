@@ -1,0 +1,372 @@
+---
+title: Classify gender (Twitter data)
+author: Aleksei Gorgadze
+output: html_document
+editor_options: 
+  chunk_output_type: console
+  code_folding: show
+---
+
+```{r, eval=FALSE}
+#####################################
+### Устанавливаем пакеты, если необходимо
+#####################################
+install.packages("quanteda")
+install.packages("caret")
+#install.packages("readr")
+#install.packages("dplyr")
+#install.packages("tidytext")
+#install.packages("stopwords")
+#install.packages("wordcloud")
+#install.packages("ggplot2")
+#install.packages("glmnet")
+#install.packages("e1071")
+
+library(caret)
+library(tidytext)
+library(stopwords)
+library(wordcloud)
+```
+
+########################
+### Наши данные: twitter
+########################
+
+```{r}
+## загружаем размеченный корпус
+library(readr)
+twitter.coded <- read_csv("twitter-gender-marked.csv")
+```
+
+################################
+### Немного дескриптивки
+################################
+
+```{r} 
+### Распределение возраста по полу
+library(dplyr)
+library(ggplot2)
+twitter.coded %>% ggplot(aes(x=age, color=sex)) + geom_density()
+```
+
+################################
+### Считаем слова
+################################
+
+```{r}
+## Подготовка данных в quanteda (альтернатива к tm)
+library(quanteda)
+library(stringr)
+```
+
+Подготовительный этап
+
+```{r}
+?tokens
+?dfm
+```
+
+Вспоминаем регулярные выражения
+
+```{r}
+nicks <- c("@let @me @mention @all_hse @the @cool @guys")
+str_replace_all(nicks, '@[a-zA-Z0-9_]+', '@user')
+```
+
+```{r}
+nooo <- c("нет, неет, нееет, и еще раз НЕЕЕЕТ! (длинношеее)")
+stringr::str_count(nooo, "\\w*([a-яА-Я])\\1\\1+\\w*")
+looong <- stringr::str_count(twitter.coded$all_tweets, "\\w*([a-яА-Я])\\1\\1+\\w*")
+```
+
+```{r}
+## строим матрицу термов-документов (надо подождать)
+dtm <- twitter.coded$all_tweets %>%
+    stringr::str_replace_all('@[a-zA-Z0-9_]+', '@user') %>%
+    tokens(what="word", remove_numbers=TRUE, remove_punct=FALSE, remove_separators=TRUE) %>%
+    dfm 
+dtm
+dtm %>% topfeatures(30)
+```
+
+**Вопрос:** Подумайте, какие изменения в параметрах препроцессинга
+текстов были бы оправданны, учитывая нашу задачу?
+
+```{r}
+## стемминг
+dtm <- dtm %>%
+    dfm_wordstem(language = "ru")
+dtm
+dtm %>% topfeatures(30)
+```
+
+
+```{r}
+## отбрасывание низкочастотных слов
+dtm <- dtm %>%
+    dfm_trim(min_docfreq=0.05, docfreq_type="prop")
+dtm
+```
+
+```{r}
+## эксперименты со взвешиванием
+dtm %>% dfm_weight(scheme="count") %>% topfeatures(30) 
+dtm %>% dfm_weight(scheme="prop") %>% topfeatures(30) 
+dtm %>% dfm_weight(scheme="logcount") %>% topfeatures(30) 
+dtm %>% dfm_weight(scheme="boolean") %>% topfeatures(30) 
+```
+
+###########################################
+### Готовим базу
+###########################################
+
+```{r}
+dtm.extended <- dtm %>% quanteda::convert(to = "data.frame") %>%
+    select(-doc_id)
+```
+
+###########################################
+### Подготовка обучающей и тестовой выборки
+###########################################
+
+```{r}
+## зафиксируем случайные числа
+set.seed(2939)
+```
+
+```{r}
+## отберем 10% выборки для тестирования
+library(caret)
+split <- createDataPartition(y=twitter.coded$sex, p = 0.9, list = FALSE)
+length(split)
+length(twitter.coded$sex)
+length(split) / length(twitter.coded$sex)
+```
+
+```{r}
+train.data <- dtm.extended[split,]
+test.data <- dtm.extended[-split,]
+train.df <- twitter.coded[split,]
+test.df <- twitter.coded[-split,]
+```
+
+###############################
+## Обучение модели
+###############################
+
+```{r}
+## параметры обучения: 10-кратная кросс-валидация
+ctrl <- trainControl(method="cv", 10, verboseIter=TRUE)
+```
+
+##########################################################
+## Задача — классификация (предсказание пола пользователя)
+##########################################################
+
+```{r}
+## Logistic regression (Maxent classifier) with regularization (elasticnet)
+model.lr <- caret::train(train.data, train.df$sex, method="glmnet", family="binomial", trControl=ctrl)
+## Посмотрите на качество модели
+model.lr
+```
+
+```{r}
+## install.packages("naivebayes")
+## Наивный Байес (Naive Bayes classifier) - надо подождать
+#model.nb <- caret::train(train.data, train.df$sex, method="naive_bayes", trControl=ctrl)
+## Посмотрите на качество модели
+#model.nb
+```
+
+```{r}
+## Список доступных алгоритмов (классификации и не только)
+names(getModelInfo())
+## См. также http://topepo.github.io/caret/bytag.html
+```
+
+###############################
+## Оценка качества
+###############################
+
+Предсказание значений с помощью модели
+
+```{r}
+## логистическая регрессия
+predicted.sex.lr <- predict(model.lr, newdata=test.data) 
+predicted.sex.lr
+as.factor(test.df$sex)
+```
+
+```{r}
+cm.lr <- confusionMatrix(data = predicted.sex.lr, reference = as.factor(test.df$sex), positive="ж")
+cm.lr
+# Accuracy - точность - доля (процент) объектов, на которых алгоритм выдал правильные ответы.
+# Accuracy = (TN + TP) / (TN + FN + TP + FP)
+# Поскольку использование точности (Accuracy) вызывает сомнение в задачах с сильном дисбалансом классов, ее необходимо нормировать
+# Для этого точность (Accuracy) нормируется с помощью точности, которую можно было получить случайно.
+# Kappa - точность решения, которое получено из нашего случайной перестановкой наблюдений.
+```
+
+###############################
+## Анализ переменных
+###############################
+
+Возвращаемся от моделей обратно к словам. 
+
+```{r}
+## MaxEnt classifier most important features
+varImp(model.lr)
+```
+
+```{r}
+## список самых больших коэффициентов модели, средствами glmnet
+tmp_coeffs <- coef(model.lr$finalModel, s = model.lr$bestTune$lambda)
+glm.coefs <- data.frame(name = tmp_coeffs@Dimnames[[1]][tmp_coeffs@i + 1], coefficient = tmp_coeffs@x)
+```
+
+```{r}
+## просмотрим, что получилось
+glm.coefs %>% dplyr::arrange(-abs(coefficient)) %>% View
+## насколько полезна наша новая ?
+glm.coefs %>% dplyr::arrange(-abs(coefficient)) %>% dplyr::filter(name=="@user")
+glm.coefs %>% dplyr::arrange(-abs(coefficient)) %>% dplyr::filter(name=="аааа")
+```
+
+```{r}
+## male features
+glm.coefs %>%
+    dplyr::filter(coefficient > 0 & abs(coefficient) > 0.1) %>%
+    dplyr::arrange(-abs(coefficient))
+```
+
+####################################
+### Анализ ошибок классификатора
+####################################
+
+```{r}
+misclassified.females <- test.df %>%
+    filter(sex == "ж" & predicted.sex.lr == "м") %>%
+    pull(screenName)
+misclassified.females
+```
+
+```{r}
+misclassified.males <- test.df %>%
+    filter(sex == "м" & predicted.sex.lr == "ж") %>%
+    pull(screenName)
+misclassified.males
+```
+
+```{r}
+## Строим корпус
+corp <- corpus(twitter.coded$all_tweets, docvars=twitter.coded[,c("screenName", "sex", "age", "error", "life_stage")])
+```
+
+```{r}
+docvars(dtm) <- docvars(corp)
+docvars(dtm) %>% head
+```
+
+
+```{r}
+## отбираем женские твиты, которые были неправильно классифицированы
+dtm.misc.female <- dtm %>% dfm_subset(screenName %in% misclassified.females)
+```
+
+**Вопрос:** Что говорит нам этот набор слов о связи гендера и
+характеристик текста? (вспомните статью Bamman et al.)
+
+```{r}
+## Рисуем облако слов
+install.packages("quanteda.textplots")
+library(quanteda.textplots)
+textplot_wordcloud(dtm.misc.female, rotation = 0.25,
+                   color = rev(RColorBrewer::brewer.pal(10, "RdBu")))
+```
+
+####################################
+### ЗАДАНИЕ
+####################################
+
+
+**Задание 1:** Придумайте новую фичу и добавьте ее в матрицу dtm
+```{r}
+#считаем длину слов
+word_len <- sapply(strsplit(twitter.coded$all_tweets, "\\s+"), function(words) {
+  words <- words[words != ""]        
+  if (length(words) == 0) return(0) 
+  mean(nchar(words))                   
+})
+
+dtm.extended$word_len <- word_len
+train.data <- dtm.extended[split, ]
+test.data  <- dtm.extended[-split, ]
+```
+
+**Задание 2:** Постройте модель
+```{r}
+train_y <- relevel(factor(train.df$sex), ref = "м")
+model.lr.new <- caret::train(
+  x = train.data,
+  y = train_y,
+  method = "glmnet",
+  family = "binomial",
+  trControl = ctrl
+)
+```
+
+**Задание 3:** Оцените качество модели (напишите словами)
+```{r}
+test_y <- factor(test.df$sex, levels = levels(train_y))
+predicted.sex.lr.new <- predict(model.lr.new, newdata = test.data)
+
+cm.lr.new <- confusionMatrix(
+  data = predicted.sex.lr.new,
+  reference = test_y,
+  positive = "ж"
+)
+cm.lr.new
+#Модель показывает Accuracy = 80,6%. Чувствительность к классу «ж» = 74%, специфичность = 87%. Это значит, что модель лучше предсказывает мужчин, чем женщин. По сравнению с базовой моделью результат изменился несущественно, новая фича (word_len) почти не повлияла на качество.
+```
+
+**Задание 4:** Предскажите значений с помощью модели и постройте список самых больших коэффициентов модели. Сработала ли Ваша ? 
+```{r}
+coefs <- coef(model.lr.new$finalModel, s = model.lr.new$bestTune$lambda)
+
+glm.coefs.new <- data.frame(
+  name = coefs@Dimnames[[1]][coefs@i + 1],
+  coefficient = coefs@x,
+  row.names = NULL
+) %>%
+  dplyr::filter(name != "(Intercept)")  
+
+glm.coefs.new %>% dplyr::filter(name == "word_len") %>% print()
+
+glm.coefs.new %>%
+  dplyr::arrange(dplyr::desc(abs(coefficient))) %>%
+  head(20) %>%
+  print()
+```
+
+**Задание 5:** Какие фичи наиболе типичны для женщин и для мужчин?
+```{r}
+female_features <- glm.coefs.new %>%
+  dplyr::filter(coefficient > 0) %>%
+  dplyr::arrange(dplyr::desc(coefficient)) %>%
+  head(10)
+print(female_features)
+
+male_features <- glm.coefs.new %>%
+  dplyr::filter(coefficient < 0) %>%
+  dplyr::arrange(coefficient) %>% 
+  head(10)
+print(male_features)
+
+#for women
+#подруг ( 0.3134838)
+#ора ( 0.2788241)
+#for men
+#ушел (-0.4284899)
+#нашел (-0.3417020)
+
+```
