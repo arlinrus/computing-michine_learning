@@ -1,0 +1,274 @@
+---
+title: Text Mining. Log-likelihood
+author: Arina Astapenkova
+output: html_document
+editor_options: 
+  chunk_output_type: console
+  code_folding: show
+---
+
+```{r}
+library(readxl)
+library(tidytext)
+library(stopwords)
+library(dplyr)
+library(ggplot2)
+library(wordcloud)
+#install.packages("tm")
+library(tm)
+library(caret)
+library(quanteda)
+library(stringr)
+#library(cleanNLP)
+```
+
+########################
+### Наши данные: ПостНаука
+########################
+
+```{r}
+# Загружаем данные
+text_df <- read_excel("text_PN_lem.xlsx")
+
+text_df <- text_df[,c(1,3,4,10)]
+  
+text.female <- text_df %>%
+    filter(sex == "Female")
+text.male <- text_df %>%
+    filter(sex == "Male")
+
+rm(text_df)
+```
+
+#############################
+### Готовим данные для Female
+#############################
+
+```{r}
+pn.long_female <- text.female %>%
+    unnest_tokens(word, text.lem) %>%
+    filter(! word %in% tm::stopwords("ru")) %>%
+    filter(! word %in% c("это", "который")) %>%
+    filter(! str_detect(word, "[0-9]+"))
+
+pn.dtm_female <- pn.long_female %>%
+    dplyr::count(line, word)
+
+names(pn.dtm_female)
+```
+
+**Задание:** Почистите данные от лишних (стопслов) и подготовьте данные для Male и запишите ее как "pn.long_male" + создайте матрицу pn.dtm_male.
+
+###########################
+### Готовим данные для Male
+###########################
+
+```{r}
+pn.long_male <- text.male %>%
+  unnest_tokens(word, text.lem) %>%
+  filter(!word %in% tm::stopwords("ru")) %>%
+  filter(!word %in% c("это", "который")) %>%
+  filter(!str_detect(word, "[0-9]+"))
+
+pn.dtm_male <- pn.long_male %>%
+  dplyr::count(line, word)
+
+names(pn.dtm_male); head(pn.long_male)
+```
+
+Соединяем предыдущие талицы в одину базу и 
+оставляем слова, которые встречаются либо у 
+женщин, либо у мужчин более 10 раз.
+Если хотим оставить слова, которые встречаются в 
+обоих базах более 10 раз, заменяем "|" на "&"
+
+```{r}
+sex.lemmas.or <- bind_rows(pn.long_female, pn.long_male) %>%
+    count(word, sex) %>%
+    tidyr::spread(sex, n, fill = 0) %>%
+    filter(Female > 10 | Male > 10)
+
+sex.lemmas.and <- bind_rows(pn.long_female, pn.long_male) %>%
+    count(word, sex) %>%
+    tidyr::spread(sex, n, fill = 0) %>%
+    filter(Female > 10 & Male > 10)
+```
+
+**Задание:** Выберите схему фильтрации и присвойте результат "sex.lemmas".
+```{r}
+# выбрала схему фильтрации sex.lemmas.and 
+sex.lemmas <- sex.lemmas.and
+```
+#########################
+# Посмотрим на распределение слов между мужчинами и женщинами
+#########################
+
+```{r}
+library(scales)
+
+ggplot(sex.lemmas, aes(Female, Male)) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  geom_abline(color = "red")
+# график показывает, что мужчины склонны больше к технической лексике, а женщины к социально-гуманитарной.
+```
+
+**Вопрос:** Подумайте, как построить более читабельный график?
+
+```{r}
+r <- sum(sex.lemmas$Male, na.rm = TRUE) / sum(sex.lemmas$Female, na.rm = TRUE)
+
+ggplot(sex.lemmas, aes(Female, Male)) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_text(
+    data = subset(sex.lemmas, Female + Male >= 200),
+    aes(label = word),
+    check_overlap = TRUE, vjust = 1.2, size = 3
+  ) +
+  geom_abline(slope = r, intercept = 0, color = "yellow") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    x = "Female", y = "Male",
+    title = "Частоты лемм: Female vs Male"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# Log-likelihood (G^2)
+
+```{r}
+### Создаем функцию для рассчета логарифмической вероятности (log-likelihood: G-squared)
+
+g2 = function(a, b) {
+  c = sum(a)
+  d = sum(b)
+  E1 = c * ((a + b) / (c + d))
+  E2 = d * ((a + b) / (c + d))
+  return(2*((a*log(a/E1+1e-7)) + (b*log(b/E2+1e-7))))
+}
+```
+
+###########################################################
+# Давайте разберемся с формулой и разберем пример на доске!
+###########################################################
+
+
+Теперь мы можем вычислить log-likelihood для каждого слова
+
+```{r}
+sex.g2 <- sex.lemmas %>% 
+    mutate(g2=g2(Female, Male)) %>%
+    arrange(desc(g2)) %>%
+    mutate(g2 = round(g2, 2))
+```
+
+#########################
+## Effect size. Log Ratio
+#########################
+
+Дополним наши расчеты вероятности правдоподобия размером эффекта. 
+Это позволит количественно определить, насколько велика разница в
+относительной частотности слов.
+
+Мы будем использовать самую простую меру размера эффекта: Log odds ratio (Отношение шансов)
+Смотрите детали тут: [Text mining with R book](https://www.tidytextmining.com/twitter.html#comparing-word-usage)).
+
+
+```{r}
+# Создаем функцию расчета Log odds ratio
+
+logratio <- function(a, b) {
+    return(log2((a/sum(a)/(b/sum(b)))))
+}
+```
+
+```{r}
+# Рассчитываем Log Ratio
+
+sex.lr <- sex.g2 %>%
+  mutate(
+    logratio = logratio(Female, Male),
+    p = 1 - pchisq(g2, df = 1),
+    p_adj = p.adjust(p, method = "BH")
+  )
+proper_names <- c("наталья","елена","татьяна","светлана","алексей","сергей","михаил") #убираем имена, чтобы работать именно со словами
+sex.lr <- sex.lr %>% filter(!word %in% proper_names)
+```
+
+###########################################
+# Слова, используемые мужчинами и женщинами
+###########################################
+
+```{r}
+sex.lr %>%
+    arrange(abs(logratio))
+```
+
+# Наиболее типичные (значимые) слова для мужчин и женщин
+
+```{r}
+sex.lr %>%
+    filter(Female > 0 & Male > 0) %>%
+    group_by(logratio < 0) %>%
+    top_n(15, abs(logratio)) %>%
+    ungroup()
+```
+
+### Нарисуем график:
+
+```{r}
+sex.lr %>%
+  filter(Female > 0 & Male > 0) %>%
+  group_by(logratio < 0) %>%
+  top_n(15, abs(logratio)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, logratio)) %>%
+  ggplot(aes(word, logratio, fill = logratio > 0)) +
+  geom_col(show.legend = TRUE) +     
+  coord_flip() +
+  ylab("log odds ratio") +
+  scale_fill_manual(
+    values = c("FALSE" = "#6A5ACD",   
+               "TRUE"  = "#BC8F8F"), 
+    labels = c("FALSE" = "Male", "TRUE" = "Female"),
+    name = NULL
+  )
+
+```
+
+**Задание:** Посмотрите, в каком контексте употребляются значимые слова, проинтерпретируйте некоторые результаты (напишите текстом).
+
+```{r}
+get_snippets <- function(df, lemma, n = 8, pad = 45) {
+  rx <- regex(paste0("(.{0,", pad, "})\\b", lemma, "\\b(.{0,", pad, "})"), ignore_case = TRUE)
+  df %>%
+    filter(str_detect(text.lem, rx)) %>%
+    transmute(snippet = str_replace_all(str_extract(text.lem, rx),
+                                        "\\s+", " ")) %>%
+    distinct() %>%
+    head(n)
+}
+get_snippets
+
+# примеры
+get_snippets(text.male,   "наука")
+get_snippets(text.female, "город")
+
+```
+Вывод 
+
+По контекстам видно, что у мужчин лемма «наука» чаще появляется в шаблонных представлениях экспертов. То есть мужской корпус заметно смещён к научно-популярной подаче с акцентом на дисциплины и статусы спикеров.
+У женщин лемма «город» тянет корпус в сторону урбанистики и соц-тем: речь про европейские города, «вечный город», QR-коды на зданиях, карьерные траектории в крупных городах, архивы и классификации поселений. Это выглядит как устойчивый сдвиг к повестке городской среды, инфраструктуры и общества.
+
+```{r}
+get_snippets(text.female, "агломерация")
+get_snippets(text.female, "загрязнение")
+```
+По контекстам видно, что в женском корпусе леммы «агломерация» и «загрязнение» употребляются в сугубо городско-экологической повестке. «Агломерация» появляется в вопросах формирования и развития современных городских агломераций, их перспектив и влияния на темп жизни («формирование современной городской агломерации?», «будущее страны в развитии агломераций…», «возникают агломерации, меняется темп жизни»). «Загрязнение» связывается с промышленностью и городским воздухом, факторами загрязнения и экологией городов («какие факторы влияют на загрязнение воздуха?», «предприятия и экология города», «виды загрязнения и способы устранения»).
+
+```{r}
+get_snippets(text.male, "физика")
+get_snippets(text.male, "полимер")
+```
+По контекстам видно, что «мужские» леммы связаны с естественными науками. Так, «физика» употребляется в темах элементарных частиц, квантовой физики и электроники, а «полимер» в материалведении и нанонауках («структура полимера», «наночастица/нанотрубка», «дизайн материалов»), местами заходя в биологический контекст (биополимеры).

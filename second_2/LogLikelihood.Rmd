@@ -1,0 +1,328 @@
+---
+title: "Text Mining. Comparing corpora"
+author: "Aleksei Gorgadze"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+  code_folding: show
+---
+
+## Comparing word usage in contrasting corpora
+
+Texts usually serve as proxy to some
+social phenomenon, sentiment, idea, or discourse. In a common research
+design, texts from several institutions, groups or actors are
+collected. These make two (or more) *contrasting corpora*. Differences
+in word usage in these corpora are used to infer something about the
+underlying social/political features of the entities these corpora
+represent.
+
+But what if we are interested in comparing *content* of the
+speech?  How to select words that are interesting? How to avoid
+arbitrary choice? To accomplish this, we need some statistical tests
+that could show which words are significantly over- or underused in
+one corpus **in contrast** to another.
+
+# Install necessary packages, if required. 
+
+```{r, eval=FALSE}
+install.packages("readr")
+install.packages("dplyr")
+install.packages("stringr")
+install.packages("tidytext")
+install.packages("stopwords")
+install.packages("tidyr")
+install.packages("ggplot2")
+
+```
+
+## Prepare data
+
+Load State of the Union data:
+
+```{r}
+library(readxl)
+sou <- read_excel("transcripts_new.xlsx")
+warnings()
+```
+
+We will now create two corpora for contrasting: speeches by Democratic and
+Republican presidents since 1917.
+
+```{r}
+library(dplyr)
+democrats <- c("Woodrow Wilson", "Franklin D. Roosevelt", "Harry
+S. Truman", "John F. Kennedy", "Lyndon B. Johnson", "Jimmy Carter",
+"William J. Clinton", "Barack Obama", "Joseph R. Biden, Jr.")
+sou.democrats <- sou %>%
+    filter(president %in% democrats)
+sou.republicans <- sou %>%
+    filter(date > "1917-10-25" & !president %in% democrats)
+```
+
+
+## More preprocessing. Stemming and lemmatization
+
+Before we move on to measuring the prevalence of content words, it is
+beneficial to make our text data less noisy. In natural language the
+same word may take various surface forms: plurals, past tense
+etc. This may be of less concern for English, but more so for more
+inflected languages. When we are interested in content, it is better
+to treat all these *wordforms* as the same word.
+
+There are two common approaches.
+
+1. **Stemming**. Simply remove word endings that contain inflection,
+   leaving a *stem*. The approach is simple and fast, and is
+   supported by numerous R packages.
+2. **Lemmatization**. Reduce a word to its dictionary form — a
+   *lemma*. This requires more linguistic data (dictionary etc.), but
+   gives more precise results. We will stick to this method.
+   
+
+What we need for our task is stems from token-level annotations. This
+is how it looks like.
+
+```{r}
+library(stringr)
+library(tidytext)
+library(stopwords)
+library(SnowballC)
+
+
+democrats.long <- sou.democrats %>%
+    unnest_tokens(word, transcript) %>%
+    mutate(stem = wordStem(word)) %>%
+    filter(! word %in% stopwords("en")) %>%
+    filter(! str_detect(word, "[0-9]+")) %>%
+    mutate(party = "democrat")
+
+
+republicans.long <- sou.republicans %>%
+    unnest_tokens(word, transcript) %>%
+    mutate(stem = wordStem(word)) %>%
+    filter(! word %in% stopwords("en")) %>%
+    filter(! str_detect(word, "[0-9]+")) %>%
+    mutate(party = "republican")
+```
+
+To make data for comparisons, we now create stem frequency lists for
+both corpora and join them in a single table.
+Filter out rare words (n<10 for both parties).
+
+```{r}
+library(tidyr)
+party.stems <- bind_rows(democrats.long, republicans.long) %>%
+    dplyr::count(stem, party) %>%
+    spread(party, n, fill = 0) %>%
+    dplyr::filter(democrat > 10 | republican > 10)
+```
+
+## Significance. Dunning log-likelihood (G^2)
+
+The most commonly used statistical measure to evaluate the
+significance of the difference of a word's frequency in two corpora is
+called log-likelihood (G-squared). 
+
+We start with defining a function that will calculate a list of G2
+values given two columns of frequencies (in corpora A and B).
+
+```{r}
+g2 = function(a, b) {
+  c = sum(a)
+  d = sum(b)
+  E1 = c * ((a + b) / (c + d))
+  E2 = d * ((a + b) / (c + d))
+  return(2*((a*log(a/E1+1e-7)) + (b*log(b/E2+1e-7))))
+}
+```
+
+Now we can calculate log-likelihood for stem frequency
+differences for each party:
+
+```{r}
+party.g2 <- party.stems %>% 
+    mutate(g2=g2(democrat, republican)) %>%
+    arrange(desc(g2)) %>%
+    mutate(g2 = round(g2, 2))
+
+#View(party.g2)
+```
+
+**Question**:
+
+1. Examine words with the most siginificant difference in frequency by
+   G2 value. Is this list different from the list of top-frequent
+   words? What does it tell us about the word usage in the two subcorpora?
+   
+
+Note that the many of the most frequent words turned out to also be
+the most significantly disproportional. This should rise suspicions.
+
+
+## Effect size. Log Ratio
+
+[Friends don't let friends calculate p-values (without understanding them).](http://www.scottbot.net/HIAL/?p=24697)
+
+So we are going to supplement our log-likelihood tests with an effect
+size measure that allow to quantify, how large exactly is the difference
+of frequencies.
+
+We will use the most conceptually simple effect size measure: Log odds
+ratio (See more details and examples in [Text mining with R
+book](https://www.tidytextmining.com/twitter.html#comparing-word-usage)). 
+
+Here we define a function similar to g2, and apply it to our data. 
+
+```{r}
+logratio <- function(a, b) {
+    return(log2((a/sum(a+0.000000000000001)/(b/sum(b+0.000000000000001))+0.000000000000001)))
+}
+```
+
+Now we may add logrations to our table.
+
+```{r}
+party.lr <- party.g2 %>%
+    mutate(logratio = logratio(democrat, republican))
+```
+
+Words used evenly by both parties:
+
+```{r}
+party.lr %>%
+    arrange(abs(logratio))
+```
+
+Words most acutely overused by one or the other party:
+
+```{r}
+party.lr %>%
+    filter(democrat > 0 & republican > 0) %>%
+    group_by(logratio < 0) %>%
+    top_n(15, abs(logratio)) %>%
+    ungroup()
+```
+
+The same result in a nice looking plot.
+
+```{r}
+#install.packages("ggplot2")
+library(ggplot2)
+party.lr %>%
+    filter(democrat > 0 & republican > 0) %>%
+    group_by(logratio < 0) %>%
+    top_n(15, abs(logratio)) %>%
+    ungroup() %>%
+    mutate(stem = reorder(stem, logratio)) %>%
+    ggplot(aes(stem, logratio, fill = logratio > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    ylab("log odds ratio (Republicans/Democrats)") +
+    scale_fill_discrete(name = "", labels = c("Democrats", "Republicans"))
+```
+
+**Question**:
+
+1. For which of these highly disproportional words we also have enough
+evidence to claim statistical significance of the difference?
+
+**Your turn**:
+
+1. Replace stemming with lemmatization using `lemmatize_words`
+   function from the `textstem` package.
+2. Name the lemmatized column `lem`.
+3. Compare lemmatized texts of President Barack Obama and other presidents.
+4. Draw a graph and describe the results in a couple of sentences.
+
+```{r}
+#replace stemming with lemmatization and name column name
+#install.packages("textstem")
+library(dplyr)
+library(tidytext)
+library(stringr)
+library(stopwords)
+library(tidyr)
+library(ggplot2)
+library(textstem)
+
+obama.long <- sou %>%
+  filter(president == "Barack Obama") %>%
+  unnest_tokens(word, transcript) %>%
+  mutate(lem = lemmatize_words(word)) %>%
+  filter(!lem %in% stopwords("en")) %>%
+  filter(!str_detect(lem, "^[0-9]+$")) %>%
+  transmute(lem, group = "Obama")
+
+others.long <- sou %>%
+  filter(president != "Barack Obama") %>%
+  unnest_tokens(word, transcript) %>%
+  mutate(lem = lemmatize_words(word)) %>%
+  filter(!lem %in% stopwords("en")) %>%
+  filter(!str_detect(lem, "^[0-9]+$")) %>%
+  transmute(lem, group = "others")
+```
+```{r}
+# frequency lemm
+lem.freq <- bind_rows(obama.long, others.long) %>%
+  count(lem, group) %>%
+  spread(group, n, fill = 0) %>%
+  filter(Obama > 10 | others > 10)
+```
+
+```{r}
+# create function
+g2 = function(a, b) {
+  c = sum(a)
+  d = sum(b)
+  E1 = c * ((a + b) / (c + d))
+  E2 = d * ((a + b) / (c + d))
+  return(2*((a*log(a/E1+1e-7)) + (b*log(b/E2+1e-7))))
+}
+logratio <- function(a, b) {
+    return(log2((a/sum(a+0.000000000000001)/(b/sum(b+0.000000000000001))+0.000000000000001)))
+}
+
+lem.stats <- lem.freq %>%
+  mutate(
+    g2 = g2(Obama, others),
+    p  = 1 - pchisq(g2, df = 1),
+    p_adj = p.adjust(p, method = "BH"),  
+    lr = logratio(Obama, others)
+  ) %>%
+  arrange(desc(abs(lr)))
+```
+
+```{r}
+#lemmatized
+sig_table <- lem.stats %>%
+  filter(p_adj < 0.05) %>%
+  top_n(30, wt = abs(lr)) %>%
+  arrange(desc(abs(lr))) %>%
+  select(lem, Obama, others, lr, g2, p, p_adj)
+
+sig_table 
+```
+```{r}
+# draw a graph
+top_lr_plot <- lem.stats %>%
+  filter(Obama > 0 & others > 0) %>%
+  group_by(lr < 0) %>%
+  top_n(15, wt = abs(lr)) %>%
+  ungroup() %>%
+  mutate(lem = reorder(lem, lr))
+
+ggplot(top_lr_plot, aes(lem, lr, fill = lr > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  xlab("Lemma") +
+  ylab("log odds ratio") +
+  ggtitle("Обама vs остальные президенты") +
+  scale_fill_manual(values = c("FALSE" = "#B0B3B8",  # others
+                               "TRUE"  = "#0057B8")) # Obama
+
+```
+
+Сравнение лемматизированных текстов Обамы с речами других президентов показывает системный сдвиг к темам цифровой экономики и климата (lemmas: cyber, tech, online, ceo, entrepreneur, carbon), а также упоминаниям внешнеполитических кейсов его периода (iran’s, afghan). У «остальных» доминируют юридико-институциональные и более архаичные маркеры стиля (shall, treaty, treasury, duty, navy, territory).
